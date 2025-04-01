@@ -32,7 +32,6 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT || 22 }}
-          script_timeout: '5m'
           envs: GITHUB_SHA=${{ github.sha }}
           script: |
             echo "Deploying $GITHUB_SHA"
