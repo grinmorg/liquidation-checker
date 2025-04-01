@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import { TelegramService } from '../telegram-bot/telegram.service';
 import { ConfigService } from '@nestjs/config';
 import { RestClientV5 } from 'bybit-api';
+import { TrackedPosition, TradeTrackerService } from './trade-tracker.service';
 
 interface LiquidationEvent {
   ts: number;
@@ -30,6 +31,7 @@ export class BybitService {
   constructor(
     private readonly configService: ConfigService,
     private readonly telegramService: TelegramService,
+    private readonly tradeTracker: TradeTrackerService,
   ) {
     this.reciverTgId = this.configService.getOrThrow('RECIVER_TELEGRAM_ID');
 
@@ -115,6 +117,19 @@ export class BybitService {
             `▸ Тейк-профит: <b>${takeProfitPrice} (+${takeProfitPercent}%)</b>\n` +
             `▸ Стоп-лосс: <b>${stopLossPrice} (-${stopLossPercent}%)</b>`,
         );
+
+        // Добавляем отслеживание позиции
+        const trackedPosition: TrackedPosition = {
+          symbol: symbol,
+          side: side,
+          entryPrice: currentPrice,
+          takeProfit: parseFloat(takeProfitPrice),
+          stopLoss: parseFloat(stopLossPrice),
+          size: roundedQty,
+          openedAt: Date.now(),
+        };
+
+        this.tradeTracker.trackNewPosition(trackedPosition);
       }
 
       return response;
