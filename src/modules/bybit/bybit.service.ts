@@ -136,7 +136,7 @@ export class BybitService {
       const timestamp = event.ts;
       const timeString = new Date(timestamp).toLocaleTimeString('ru-RU');
 
-      // Порог в 10000$ для фильтрации мелких сделок |
+      // Порог в 10000$ для фильтрации мелких сделок
       if (positionSize > 10000) {
         const tradeSide = side === 'Buy' ? 'Sell' : 'Buy';
         const sideEmoji = side === 'Buy' ? '🟢' : '🔴';
