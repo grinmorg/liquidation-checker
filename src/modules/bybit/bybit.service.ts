@@ -221,6 +221,7 @@ export class BybitService {
       ETHUSDT: 0.01,
       SOLUSDT: 0.1,
       BNBUSDT: 0.01,
+      '1000PEPEUSDT': 100,
     };
     return minSteps[symbol] || 0.001;
   }
@@ -232,6 +233,7 @@ export class BybitService {
       ETHUSDT: 0.01,
       SOLUSDT: 0.1,
       BNBUSDT: 0.01,
+      '1000PEPEUSDT': 100,
     };
     return minQtys[symbol] || 0.001;
   }
@@ -365,6 +367,7 @@ export class BybitService {
             'allLiquidation.ETHUSDT',
             'allLiquidation.SOLUSDT',
             'allLiquidation.BNBUSDT',
+            'allLiquidation.1000PEPEUSDT',
           ],
         }),
       );
