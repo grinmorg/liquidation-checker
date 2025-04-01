@@ -17,7 +17,7 @@ export class TelegramService implements OnModuleInit {
     const token = this.configService.get('TELEGRAM_BOT_TOKEN');
     if (!token) {
       this.logger.error('TELEGRAM_BOT_TOKEN не найден!');
-      throw new Error('Telegram token not provided');
+      return;
     }
 
     this.bot = new TelegramBot(token, { polling: true });
@@ -31,7 +31,10 @@ export class TelegramService implements OnModuleInit {
 
   async sendMessage(chatId: string, message: string) {
     if (!this.bot) {
-      throw new Error('Telegram бот не инициализирован');
+      this.logger.error(
+        'Телеграм бота не инициализирован, поэтому сообщение не отправилось...',
+      );
+      return;
     }
 
     try {
