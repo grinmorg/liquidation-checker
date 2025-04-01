@@ -39,16 +39,16 @@ jobs:
             source ~/.bashrc
             git fetch
             git reset --hard origin/main
-            pnpm install --frozen-lockfile --prod
-            pnpm build
+            /usr/local/bin/pnpm install --frozen-lockfile --prod
+            /usr/local/bin/pnpm build
 
             sleep 5
 
 
             echo "Restarting PM2..."
-            pm2 restart all
+            /usr/local/bin/pm2 restart all
 
             echo "PM2 logs:"
-            pm2 logs --lines 10
+            /usr/local/bin/pm2 logs --lines 10
 
             echo "Deployment completed successfully"
