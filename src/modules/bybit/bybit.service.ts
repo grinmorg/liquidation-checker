@@ -51,18 +51,26 @@ export class BybitService {
     usdAmount: number,
   ) {
     try {
-      const currentPosition = await this.getCurrentPositions(symbol);
+      console.log(`[placeOrder] Начало для ${symbol} ${side} ${usdAmount}$`);
 
-      if (currentPosition.side === side) {
-        await this.telegramService.sendMessage(
-          this.reciverTgId,
+      // 1. Проверяем текущие позиции
+      console.log(`[placeOrder] Проверка позиций для ${symbol}`);
+      const currentPosition = await this.getCurrentPositions(symbol);
+      console.log(`[placeOrder] Текущая позиция:`, currentPosition);
+
+      if (currentPosition.side === side && currentPosition.size > 0) {
+        const message =
           `<b>⚠️ Пропуск ордера:</b>\n` +
-            `Уже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}\n` +
-            `Текущий размер: ${currentPosition.size}`,
-        );
+          `Уже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}\n` +
+          `Текущий размер: ${currentPosition.size}`;
+
+        console.log(`[placeOrder] ${message}`);
+        await this.telegramService.sendMessage(this.reciverTgId, message);
         return { skipped: true };
       }
 
+      // 2. Получаем текущую цену
+      console.log(`[placeOrder] Получение цены для ${symbol}`);
       const tickerResponse = await this.bybitClient.getTickers({
         category: 'linear',
         symbol,
@@ -73,10 +81,17 @@ export class BybitService {
       }
 
       const currentPrice = parseFloat(tickerResponse.result.list[0].lastPrice);
-      const qty = usdAmount / currentPrice;
-      const minQty = 0.001;
-      const roundedQty = Math.max(minQty, parseFloat(qty.toFixed(3)));
+      console.log(`[placeOrder] Текущая цена: ${currentPrice}`);
 
+      // 3. Рассчитываем количество
+      const qty = usdAmount / currentPrice;
+      const minQty = this.getMinQty(symbol); // Функция с минимальными объемами для разных пар
+      const roundedQty = this.calculateValidQty(symbol, currentPrice, qty);
+      console.log(
+        `[placeOrder] Рассчитанное количество: ${roundedQty} (min: ${minQty})`,
+      );
+
+      // 4. Настраиваем тейк-профит и стоп-лосс
       const takeProfitPercent = 0.5;
       const stopLossPercent = 0.2;
 
@@ -90,6 +105,13 @@ export class BybitService {
           ? (currentPrice * (1 - stopLossPercent / 100)).toFixed(2)
           : (currentPrice * (1 + stopLossPercent / 100)).toFixed(2);
 
+      console.log(`[placeOrder] Параметры ордера:`, {
+        takeProfit: takeProfitPrice,
+        stopLoss: stopLossPrice,
+      });
+
+      // 5. Размещаем ордер
+      console.log(`[placeOrder] Отправка ордера на Bybit...`);
       const response = await this.bybitClient.submitOrder({
         category: 'linear',
         symbol,
@@ -105,18 +127,21 @@ export class BybitService {
         positionIdx: 0,
       });
 
+      console.log(`[placeOrder] Ответ от Bybit:`, response);
+
       if (response.retCode === 0) {
-        await this.telegramService.sendMessage(
-          this.reciverTgId,
+        const message =
           `<b>⚡ Ордер исполнен</b>\n` +
-            `▸ Символ: <b>${symbol}</b>\n` +
-            `▸ Тип: <b>${side === 'Buy' ? 'Лонг' : 'Шорт'}</b>\n` +
-            `▸ Объем: <b>${roundedQty.toFixed(4)} ${symbol.replace('USDT', '')}</b>\n` +
-            `▸ Сумма: <b>${usdAmount}$</b>\n` +
-            `▸ Цена входа: <b>${currentPrice.toFixed(2)}</b>\n` +
-            `▸ Тейк-профит: <b>${takeProfitPrice} (+${takeProfitPercent}%)</b>\n` +
-            `▸ Стоп-лосс: <b>${stopLossPrice} (-${stopLossPercent}%)</b>`,
-        );
+          `▸ Символ: <b>${symbol}</b>\n` +
+          `▸ Тип: <b>${side === 'Buy' ? 'Лонг' : 'Шорт'}</b>\n` +
+          `▸ Объем: <b>${roundedQty} ${symbol.replace('USDT', '')}</b>\n` +
+          `▸ Сумма: <b>${usdAmount}$</b>\n` +
+          `▸ Цена входа: <b>${currentPrice.toFixed(2)}</b>\n` +
+          `▸ Тейк-профит: <b>${takeProfitPrice} (+${takeProfitPercent}%)</b>\n` +
+          `▸ Стоп-лосс: <b>${stopLossPrice} (-${stopLossPercent}%)</b>`;
+
+        console.log(`[placeOrder] Успех: ${message}`);
+        await this.telegramService.sendMessage(this.reciverTgId, message);
 
         // Добавляем отслеживание позиции
         const trackedPosition: TrackedPosition = {
@@ -125,16 +150,25 @@ export class BybitService {
           entryPrice: currentPrice,
           takeProfit: parseFloat(takeProfitPrice),
           stopLoss: parseFloat(stopLossPrice),
-          size: roundedQty,
+          size: parseFloat(roundedQty),
           openedAt: Date.now(),
         };
 
         this.tradeTracker.trackNewPosition(trackedPosition);
+      } else {
+        console.error(`[placeOrder] Ошибка от Bybit:`, response);
+        throw new Error(
+          response.retMsg ||
+            `Ошибка размещения ордера: код ${response.retCode}`,
+        );
       }
 
       return response;
     } catch (error) {
       const errorMsg = error.response?.data?.retMsg || error.message;
+      const logMessage = `[placeOrder] Ошибка для ${symbol} ${side}: ${errorMsg}`;
+      console.error(logMessage, error);
+
       await this.telegramService.sendMessage(
         this.reciverTgId,
         `<b>❌ Ошибка ордера</b>\n` +
@@ -143,6 +177,63 @@ export class BybitService {
       );
       throw error;
     }
+  }
+
+  private calculateValidQty(
+    symbol: string,
+    price: number,
+    qty: number,
+  ): string {
+    // Определяем шаг округления в зависимости от цены
+    let precision: number;
+
+    if (price >= 10000) {
+      precision = 3; // Для активов дороже $10,000 - 3 знака после запятой
+    } else if (price >= 1000) {
+      precision = 2; // Для активов дороже $1,000 - 2 знака
+    } else {
+      precision = 1; // Для остальных - 1 знак
+    }
+
+    // Получаем минимальный шаг для символа
+    const minStep = this.getMinStep(symbol);
+    const minQty = this.getMinQty(symbol);
+
+    // Округляем до нужного количества знаков
+    let rounded = parseFloat(qty.toFixed(precision));
+
+    // Проверяем, чтобы количество было кратно минимальному шагу
+    if (minStep > 0) {
+      rounded = Math.round(rounded / minStep) * minStep;
+    }
+
+    // Проверяем минимальное количество
+    rounded = Math.max(minQty, rounded);
+
+    // Форматируем без лишних нулей
+    return rounded.toFixed(precision).replace(/\.?0+$/, '');
+  }
+
+  private getMinStep(symbol: string): number {
+    // Минимальные шаги для разных пар (можно расширить)
+    const minSteps: Record<string, number> = {
+      BTCUSDT: 0.001,
+      ETHUSDT: 0.01,
+      SOLUSDT: 0.1,
+      BNBUSDT: 0.01,
+    };
+    return minSteps[symbol] || 0.001;
+  }
+
+  private getMinQty(symbol: string): number {
+    // Минимальные объемы для разных пар
+    const minQtys: Record<string, number> = {
+      BTCUSDT: 0.001,
+      ETHUSDT: 0.01,
+      SOLUSDT: 0.1,
+      BNBUSDT: 0.01,
+    };
+    return minQtys[symbol] || 0.001;
   }
 
   private async handleLiquidation(event: LiquidationEvent) {
