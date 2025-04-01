@@ -36,6 +36,7 @@ jobs:
           script: |
             echo "Deploying $GITHUB_SHA"
             cd /home/liquidation-checker
+            source ~/.bashrc
             git fetch
             git reset --hard origin/main
             pnpm install --frozen-lockfile --prod
