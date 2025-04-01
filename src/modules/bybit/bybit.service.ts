@@ -43,6 +43,20 @@ export class BybitService {
     usdAmount: number,
   ) {
     try {
+      // Проверяем текущие позиции
+      const currentPosition = await this.getCurrentPositions(symbol);
+
+      // Если уже есть позиция в том же направлении
+      if (currentPosition.side === side) {
+        await this.telegramService.sendMessage(
+          this.reciverTgId,
+          `<b>⚠️ Пропуск ордера:</b>\n` +
+            `Уже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}\n` +
+            `Текущий размер: ${currentPosition.size}`,
+        );
+        return { skipped: true };
+      }
+
       // 1. Получаем текущую рыночную цену
       const tickerResponse = await this.bybitClient.getTickers({
         category: 'linear',
@@ -163,12 +177,42 @@ export class BybitService {
     }
   }
 
+  // Получение позиции
+  private async getCurrentPositions(symbol: string): Promise<{
+    side: 'Buy' | 'Sell' | 'None';
+    size: number;
+  }> {
+    try {
+      const response = await this.bybitClient.getPositionInfo({
+        category: 'linear',
+        symbol: symbol,
+      });
+
+      if (response.retCode !== 0 || !response.result?.list?.length) {
+        return { side: 'None', size: 0 };
+      }
+
+      const position = response.result.list[0];
+      const size = parseFloat(position.size);
+
+      if (size === 0) {
+        return { side: 'None', size: 0 };
+      }
+
+      return {
+        side: position.side === 'Buy' ? 'Buy' : 'Sell',
+        size: size,
+      };
+    } catch (error) {
+      console.error('Error getting positions:', error);
+      return { side: 'None', size: 0 };
+    }
+  }
+
   private async setupWebSocket() {
     this.ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
 
     this.ws.on('open', async () => {
-      console.log('ТЕСТОВЫЙ ЛОГ 5');
-
       console.log('WebSocket connected to Bybit');
 
       this.ws.send(
