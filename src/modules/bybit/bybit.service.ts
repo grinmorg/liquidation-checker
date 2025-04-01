@@ -138,7 +138,7 @@ export class BybitService {
 
       // Порог в 10000$ для фильтрации мелких сделок
       if (positionSize > 10000) {
-        const tradeSide = side === 'Buy' ? 'Buy' : 'Sell'; // сейчас стратегия торговли по тренду
+        const tradeSide = side === 'Buy' ? 'Sell' : 'Buy';
         const sideEmoji = side === 'Buy' ? '🟢' : '🔴';
         const sideText = side === 'Buy' ? 'ЛОНГ' : 'ШОРТ';
 

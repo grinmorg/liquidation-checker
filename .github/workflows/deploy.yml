@@ -34,21 +34,37 @@ jobs:
           port: ${{ secrets.SERVER_PORT || 22 }}
           envs: GITHUB_SHA=${{ github.sha }}
           script: |
-            echo "Deploying $GITHUB_SHA"
+            echo "=== Starting Deployment ==="
+
+            # 1. Загружаем Node.js в PATH
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+
+            # 2. Проверяем доступность Node.js
+            echo "Node.js version: $(node -v)"
+            echo "npm version: $(npm -v)"
+            echo "pnpm path: $(which pnpm)"
+            echo "pm2 path: $(which pm2)"
+
+            # 3. Обновляем код
             cd /home/liquidation-checker
-            source ~/.bashrc
             git fetch
             git reset --hard origin/main
+
+            # 4. Устанавливаем зависимости
             /usr/local/bin/pnpm install --frozen-lockfile --prod
+
+            # 5. Собираем проект
             /usr/local/bin/pnpm build
 
+            # 6. Перезапускаем приложение
             sleep 5
-
-
             echo "Restarting PM2..."
             /usr/local/bin/pm2 restart all
 
-            echo "PM2 logs:"
-            /usr/local/bin/pm2 logs --lines 10
+            # 7. Проверяем статус
+            echo "PM2 status:"
+            /usr/local/bin/pm2 list
 
-            echo "Deployment completed successfully"
+            echo "=== Deployment Successful ==="
