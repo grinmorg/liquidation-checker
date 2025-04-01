@@ -163,17 +163,13 @@ export class BybitService {
     }
   }
 
-  private setupWebSocket() {
+  private async setupWebSocket() {
     this.ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
 
     this.ws.on('open', async () => {
-      console.log('ТЕСТОВЫЙ ЛОГ 4');
+      console.log('ТЕСТОВЫЙ ЛОГ 5');
 
       console.log('WebSocket connected to Bybit');
-      await this.telegramService.sendMessage(
-        this.reciverTgId,
-        'Прослушиваем ликвидации Bybit...',
-      );
 
       this.ws.send(
         JSON.stringify({
