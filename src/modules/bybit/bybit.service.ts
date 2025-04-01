@@ -141,15 +141,13 @@ export class BybitService {
         const tradeSide = side === 'Buy' ? 'Sell' : 'Buy';
         const sideEmoji = side === 'Buy' ? '🟢' : '🔴';
         const sideText = side === 'Buy' ? 'ЛОНГ' : 'ШОРТ';
-        const oppositeSideText = side === 'Buy' ? 'ШОРТ' : 'ЛОНГ';
 
         try {
           // Отправляем уведомление перед размещением ордера
           await this.telegramService.sendMessage(
             this.reciverTgId,
             `<b>⚠️ (${timeString}) ЛИКВИДАЦИЯ ${sideText} ${sideEmoji} ${symbolPair}:</b>\n` +
-              `<i>на сумму ${Math.round(positionSize)}$</i>\n` +
-              `<b>Открываю ${oppositeSideText} на 10$</b>`,
+              `<i>на сумму ${Math.round(positionSize)}$</i>\n`,
           );
 
           // Размещаем ордер
