@@ -20,6 +20,12 @@ export class BybitService {
   private readonly bybitClient: RestClientV5;
   private ws: WebSocket;
 
+  // Добавляем кэш последних ликвидаций
+  private liquidationCache: Record<
+    string,
+    { lastBuyLiquidation: number; lastSellLiquidation: number }
+  > = {};
+
   constructor(
     private readonly configService: ConfigService,
     private readonly telegramService: TelegramService,
@@ -43,6 +49,17 @@ export class BybitService {
     usdAmount: number,
   ) {
     try {
+      // Проверка временного интервала
+      if (!this.checkLiquidationTime(symbol, side)) {
+        await this.telegramService.sendMessage(
+          this.reciverTgId,
+          `<b>⏳ Пропуск ордера:</b>\n` +
+            `Слишком частая активность по ${symbol}\n` +
+            `Последняя противоположная ликвидация менее 10 сек назад`,
+        );
+        return { skipped: true };
+      }
+
       // Проверяем текущие позиции
       const currentPosition = await this.getCurrentPositions(symbol);
 
@@ -73,8 +90,6 @@ export class BybitService {
       const qty = usdAmount / currentPrice;
       const minQty = 0.001; // Минимальный размер ордера для BTCUSDT
       const roundedQty = Math.max(minQty, parseFloat(qty.toFixed(3)));
-
-      console.log(roundedQty);
 
       // 3. Рассчитываем уровни тейк-профита и стоп-лосса
       const takeProfitPercent = 0.5;
@@ -147,6 +162,18 @@ export class BybitService {
         `Liquidation: ${symbolPair} - SIDE: ${side} - VOLUME: ${volume} - PRICE: ${price} - POSITION: ${positionSize}`,
       );
 
+      // Обновляем кэш ликвидаций
+      this.updateLiquidationCache(symbolPair, side);
+
+      // Проверяем временной интервал
+      const canTrade = this.checkLiquidationTime(symbolPair, side);
+      if (!canTrade) {
+        console.log(
+          `Пропуск торговой операции для ${symbolPair} - слишком частая ликвидация`,
+        );
+        continue;
+      }
+
       const timestamp = event.ts;
       const timeString = new Date(timestamp).toLocaleTimeString('ru-RU');
 
@@ -175,6 +202,47 @@ export class BybitService {
         }
       }
     }
+  }
+
+  //  Обновление кэша ликвидаций
+  private updateLiquidationCache(symbol: string, side: 'Buy' | 'Sell') {
+    if (!this.liquidationCache[symbol]) {
+      this.liquidationCache[symbol] = {
+        lastBuyLiquidation: 0,
+        lastSellLiquidation: 0,
+      };
+    }
+
+    const now = Date.now();
+    if (side === 'Buy') {
+      this.liquidationCache[symbol].lastBuyLiquidation = now;
+    } else {
+      this.liquidationCache[symbol].lastSellLiquidation = now;
+    }
+
+    // Автоочистка старых записей
+    setTimeout(() => {
+      if (
+        now - this.liquidationCache[symbol].lastBuyLiquidation > 30000 &&
+        now - this.liquidationCache[symbol].lastSellLiquidation > 30000
+      ) {
+        delete this.liquidationCache[symbol];
+      }
+    }, 30000);
+  }
+
+  //  Проверка временного интервала
+  private checkLiquidationTime(symbol: string, side: 'Buy' | 'Sell'): boolean {
+    const cache = this.liquidationCache[symbol];
+    if (!cache) return true;
+
+    const now = Date.now();
+    const lastTime =
+      side === 'Buy'
+        ? cache.lastSellLiquidation // Проверяем противоположное направление
+        : cache.lastBuyLiquidation;
+
+    return now - lastTime > 10000; // 10 секунд
   }
 
   // Получение позиции
