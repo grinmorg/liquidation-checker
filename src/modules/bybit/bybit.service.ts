@@ -53,94 +53,92 @@ export class BybitService {
     try {
       console.log(`[placeOrder] Начало для ${symbol} ${side} ${usdAmount}$`);
 
-      // 1. Проверяем текущие позиции
-      console.log(`[placeOrder] Проверка позиций для ${symbol}`);
-      const currentPosition = await this.getCurrentPositions(symbol);
-      console.log(`[placeOrder] Текущая позиция:`, currentPosition);
-
-      if (currentPosition.side === side && currentPosition.size > 0) {
-        const message =
-          `<b>⚠️ Пропуск ордера:</b>\n` +
-          `Уже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}\n` +
-          `Текущий размер: ${currentPosition.size}`;
-
-        console.log(`[placeOrder] ${message}`);
-        await this.telegramService.sendMessage(this.reciverTgId, message);
-        return { skipped: true };
-      }
-
-      // 2. Получаем текущую цену
-      console.log(`[placeOrder] Получение цены для ${symbol}`);
-      const tickerResponse = await this.bybitClient.getTickers({
+      // 1. Получаем информацию о символе
+      const symbolInfo = await this.bybitClient.getInstrumentsInfo({
         category: 'linear',
         symbol,
       });
 
-      if (!tickerResponse.result?.list?.length) {
-        throw new Error('Не удалось получить текущую цену');
+      if (!symbolInfo.result?.list?.length) {
+        throw new Error('Не удалось получить информацию о символе');
       }
 
-      const currentPrice = parseFloat(tickerResponse.result.list[0].lastPrice);
-      console.log(`[placeOrder] Текущая цена: ${currentPrice}`);
+      const instrument = symbolInfo.result.list[0];
+      const priceFilter = instrument.priceFilter;
 
-      // 3. Рассчитываем количество
-      const qty = usdAmount / currentPrice;
-      const minQty = this.getMinQty(symbol); // Функция с минимальными объемами для разных пар
-      const roundedQty = this.calculateValidQty(symbol, currentPrice, qty);
-      console.log(
-        `[placeOrder] Рассчитанное количество: ${roundedQty} (min: ${minQty})`,
-      );
+      // 2. Проверяем текущие позиции
+      const currentPosition = await this.getCurrentPositions(symbol);
+      if (currentPosition.side === side && currentPosition.size > 0) {
+        const message = `<b>⚠️ Пропуск ордера:</b>\nУже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}`;
+        await this.telegramService.sendMessage(this.reciverTgId, message);
+        return { skipped: true };
+      }
 
-      // 4. Настраиваем тейк-профит и стоп-лосс
-      const takeProfitPercent = 0.5;
-      const stopLossPercent = 0.2;
-
-      const takeProfitPrice =
-        side === 'Buy'
-          ? (currentPrice * (1 + takeProfitPercent / 100)).toFixed(2)
-          : (currentPrice * (1 - takeProfitPercent / 100)).toFixed(2);
-
-      const stopLossPrice =
-        side === 'Buy'
-          ? (currentPrice * (1 - stopLossPercent / 100)).toFixed(2)
-          : (currentPrice * (1 + stopLossPercent / 100)).toFixed(2);
-
-      console.log(`[placeOrder] Параметры ордера:`, {
-        takeProfit: takeProfitPrice,
-        stopLoss: stopLossPrice,
+      // 3. Получаем текущую цену
+      const tickerResponse = await this.bybitClient.getTickers({
+        category: 'linear',
+        symbol,
       });
+      const currentPrice = parseFloat(tickerResponse.result.list[0].lastPrice);
 
-      // 5. Размещаем ордер
-      console.log(`[placeOrder] Отправка ордера на Bybit...`);
+      // 4. Рассчитываем количество с учетом правил символа
+      const qty = usdAmount / currentPrice;
+      const roundedQty = this.calculateValidQty(symbol, currentPrice, qty);
+
+      // 5. Рассчитываем TP/SL с учетом правил цены
+      const takeProfitPercent = 1;
+      const stopLossPercent = 0.35;
+
+      let takeProfitPrice =
+        side === 'Buy'
+          ? currentPrice * (1 + takeProfitPercent / 100)
+          : currentPrice * (1 - takeProfitPercent / 100);
+
+      let stopLossPrice =
+        side === 'Buy'
+          ? currentPrice * (1 - stopLossPercent / 100)
+          : currentPrice * (1 + stopLossPercent / 100);
+
+      // Корректируем цены под tickSize
+      const adjustPrice = (price: number) => {
+        const tickSize = parseFloat(priceFilter.tickSize);
+        return Math.round(price / tickSize) * tickSize;
+      };
+
+      takeProfitPrice = adjustPrice(takeProfitPrice);
+      stopLossPrice = adjustPrice(stopLossPrice);
+
+      // Валидация TP/SL
+      if (side === 'Sell' && takeProfitPrice >= currentPrice) {
+        throw new Error(
+          `TP для шорта должен быть ниже цены входа (${takeProfitPrice} >= ${currentPrice})`,
+        );
+      }
+      if (side === 'Buy' && takeProfitPrice <= currentPrice) {
+        throw new Error(
+          `TP для лонга должен быть выше цены входа (${takeProfitPrice} <= ${currentPrice})`,
+        );
+      }
+
+      // 6. Отправляем ордер
       const response = await this.bybitClient.submitOrder({
         category: 'linear',
         symbol,
         side,
         orderType: 'Market',
-        qty: roundedQty.toString(),
+        qty: roundedQty,
         timeInForce: 'GTC',
         isLeverage: 1,
-        takeProfit: takeProfitPrice,
-        stopLoss: stopLossPrice,
+        takeProfit: takeProfitPrice.toFixed(2),
+        stopLoss: stopLossPrice.toFixed(2),
         tpTriggerBy: 'MarkPrice',
         slTriggerBy: 'MarkPrice',
-        positionIdx: 0,
+        positionIdx: side === 'Buy' ? 1 : 2,
       });
 
-      console.log(`[placeOrder] Ответ от Bybit:`, response);
-
+      // 7. Отправка уведомления и обработка результата
       if (response.retCode === 0) {
-        const message =
-          `<b>⚡ Ордер исполнен</b>\n` +
-          `▸ Символ: <b>${symbol}</b>\n` +
-          `▸ Тип: <b>${side === 'Buy' ? 'Лонг' : 'Шорт'}</b>\n` +
-          `▸ Объем: <b>${roundedQty} ${symbol.replace('USDT', '')}</b>\n` +
-          `▸ Сумма: <b>${usdAmount}$</b>\n` +
-          `▸ Цена входа: <b>${currentPrice.toFixed(2)}</b>\n` +
-          `▸ Тейк-профит: <b>${takeProfitPrice} (+${takeProfitPercent}%)</b>\n` +
-          `▸ Стоп-лосс: <b>${stopLossPrice} (-${stopLossPercent}%)</b>`;
-
-        console.log(`[placeOrder] Успех: ${message}`);
+        const message = `<b>⚡ Ордер исполнен</b>\n▸ Символ: <b>${symbol}</b>\n▸ Тип: <b>${side}</b>`;
         await this.telegramService.sendMessage(this.reciverTgId, message);
 
         // Добавляем отслеживание позиции
@@ -148,32 +146,21 @@ export class BybitService {
           symbol: symbol,
           side: side,
           entryPrice: currentPrice,
-          takeProfit: parseFloat(takeProfitPrice),
-          stopLoss: parseFloat(stopLossPrice),
+          takeProfit: takeProfitPrice,
+          stopLoss: stopLossPrice,
           size: parseFloat(roundedQty),
           openedAt: Date.now(),
         };
 
         this.tradeTracker.trackNewPosition(trackedPosition);
-      } else {
-        console.error(`[placeOrder] Ошибка от Bybit:`, response);
-        throw new Error(
-          response.retMsg ||
-            `Ошибка размещения ордера: код ${response.retCode}`,
-        );
       }
 
       return response;
     } catch (error) {
       const errorMsg = error.response?.data?.retMsg || error.message;
-      const logMessage = `[placeOrder] Ошибка для ${symbol} ${side}: ${errorMsg}`;
-      console.error(logMessage, error);
-
       await this.telegramService.sendMessage(
         this.reciverTgId,
-        `<b>❌ Ошибка ордера</b>\n` +
-          `▸ Символ: ${symbol}\n` +
-          `▸ Причина: ${errorMsg}`,
+        `<b>❌ Ошибка:</b> ${symbol} - ${errorMsg}`,
       );
       throw error;
     }
@@ -245,6 +232,11 @@ export class BybitService {
       const { S: side, s: symbolPair, p: price, v: volume } = d;
       const positionSize = parseFloat(price) * parseFloat(volume);
 
+      // Игнорируем ликвидации меньше $1,000
+      if (positionSize < 1000) {
+        continue;
+      }
+
       console.log(
         `Liquidation: ${symbolPair} - SIDE: ${side} - VOLUME: ${volume} - PRICE: ${price} - POSITION: ${positionSize}`,
       );
@@ -254,14 +246,16 @@ export class BybitService {
       const timestamp = event.ts;
       const timeString = new Date(timestamp).toLocaleTimeString('ru-RU');
 
-      if (positionSize > 10000) {
+      // Уведомление для крупных ликвидаций (>$100k)
+      if (positionSize > 100000) {
         const sideEmoji = side === 'Buy' ? '🟢' : '🔴';
         const sideText = side === 'Buy' ? 'ЛОНГ' : 'ШОРТ';
 
         await this.telegramService.sendMessage(
           this.reciverTgId,
-          `<b>⚠️ (${timeString}) ЛИКВИДАЦИЯ ${sideText} ${sideEmoji} ${symbolPair}:</b>\n` +
-            `<i>на сумму ${Math.round(positionSize)}$</i>\n`,
+          `<b>⚠️ (${timeString}) КРУПНАЯ ЛИКВИДАЦИЯ ${sideText} ${sideEmoji} ${symbolPair}:</b>\n` +
+            `<i>на сумму ${Math.round(positionSize)}$</i>\n` +
+            `<i>Ожидаем окончания каскада...</i>`,
         );
       }
 
@@ -271,20 +265,29 @@ export class BybitService {
         clearTimeout(existingTimer);
       }
 
-      const currentLiquidationTime =
+      // Запоминаем время последней ликвидации
+      const lastLiquidationTime =
         this.liquidationCache[symbolPair]?.[
           side === 'Buy' ? 'lastBuyLiquidation' : 'lastSellLiquidation'
         ] || 0;
 
+      // Устанавливаем таймер на 10 секунд
       this.timers[timerKey] = setTimeout(async () => {
-        const newLiquidationTime =
+        // Проверяем, были ли новые ликвидации за последние 10 секунд
+        const currentLiquidationTime =
           this.liquidationCache[symbolPair]?.[
             side === 'Buy' ? 'lastBuyLiquidation' : 'lastSellLiquidation'
           ] || 0;
 
-        if (newLiquidationTime <= currentLiquidationTime) {
+        if (currentLiquidationTime <= lastLiquidationTime) {
           try {
             const tradeSide = side === 'Buy' ? 'Sell' : 'Buy';
+            await this.telegramService.sendMessage(
+              this.reciverTgId,
+              `<b>⚡ Размещаем ордер после ликвидации:</b>\n` +
+                `▸ Символ: ${symbolPair}\n` +
+                `▸ Направление: ${tradeSide === 'Buy' ? 'Лонг' : 'Шорт'}`,
+            );
             await this.placeOrder(symbolPair, tradeSide, 1000);
           } catch (error) {
             await this.telegramService.sendMessage(
@@ -293,8 +296,15 @@ export class BybitService {
                 `${error.message || 'Неизвестная ошибка'}`,
             );
           }
+        } else {
+          await this.telegramService.sendMessage(
+            this.reciverTgId,
+            `<b>⚠️ Обнаружен каскад ликвидаций:</b>\n` +
+              `▸ Символ: ${symbolPair}\n` +
+              `▸ Продолжаем наблюдение...`,
+          );
         }
-      }, 10000);
+      }, 10000); // Ждем 10 секунд
     }
   }
 
@@ -313,6 +323,7 @@ export class BybitService {
       this.liquidationCache[symbol].lastSellLiquidation = now;
     }
 
+    // Очищаем кэш через 30 секунд неактивности
     setTimeout(() => {
       if (
         now - this.liquidationCache[symbol].lastBuyLiquidation > 30000 &&
