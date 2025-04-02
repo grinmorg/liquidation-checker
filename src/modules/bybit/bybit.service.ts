@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { WebSocket } from 'ws';
 import { TelegramService } from '../telegram-bot/telegram.service';
 import { ConfigService } from '@nestjs/config';
-import { RestClientV5 } from 'bybit-api';
+import { OrderParamsV5, RestClientV5 } from 'bybit-api';
 import { TrackedPosition, TradeTrackerService } from './trade-tracker.service';
 
 interface LiquidationEvent {
@@ -51,22 +51,25 @@ export class BybitService {
     usdAmount: number,
   ) {
     try {
-      console.log(`[placeOrder] Начало для ${symbol} ${side} ${usdAmount}$`);
+      console.log(
+        `[${new Date().toISOString()}] [placeOrder] Начало для ${symbol} ${side} ${usdAmount}$`,
+      );
 
-      // 1. Получаем информацию о символе
+      // 1. Получение информации о символе
       const symbolInfo = await this.bybitClient.getInstrumentsInfo({
         category: 'linear',
         symbol,
       });
 
-      if (!symbolInfo.result?.list?.length) {
-        throw new Error('Не удалось получить информацию о символе');
+      if (!symbolInfo.result?.list?.[0]) {
+        throw new Error(`Символ ${symbol} не найден`);
       }
 
       const instrument = symbolInfo.result.list[0];
       const priceFilter = instrument.priceFilter;
+      const lotSizeFilter = instrument.lotSizeFilter;
 
-      // 2. Проверяем текущие позиции
+      // 2. Проверка текущих позиций
       const currentPosition = await this.getCurrentPositions(symbol);
       if (currentPosition.side === side && currentPosition.size > 0) {
         const message = `<b>⚠️ Пропуск ордера:</b>\nУже есть открытая позиция ${side === 'Buy' ? 'Лонг' : 'Шорт'} по ${symbol}`;
@@ -74,54 +77,52 @@ export class BybitService {
         return { skipped: true };
       }
 
-      // 3. Получаем текущую цену
+      // 3. Получение текущей цены
       const tickerResponse = await this.bybitClient.getTickers({
         category: 'linear',
         symbol,
       });
+
+      if (!tickerResponse.result?.list?.[0]?.lastPrice) {
+        throw new Error('Не удалось получить цену');
+      }
+
       const currentPrice = parseFloat(tickerResponse.result.list[0].lastPrice);
 
-      // 4. Рассчитываем количество с учетом правил символа
+      // 4. Расчет количества с учетом правил
       const qty = usdAmount / currentPrice;
-      const roundedQty = this.calculateValidQty(symbol, currentPrice, qty);
+      const roundedQty = this.calculateValidQty(
+        symbol,
+        currentPrice,
+        qty,
+        lotSizeFilter,
+      );
 
-      // 5. Рассчитываем TP/SL с учетом правил цены
+      console.log('Рассчитанное количество:', qty, 'Округленное:', roundedQty);
+
+      // 5. Расчет TP/SL
       const takeProfitPercent = 1;
       const stopLossPercent = 0.35;
 
-      let takeProfitPrice =
-        side === 'Buy'
-          ? currentPrice * (1 + takeProfitPercent / 100)
-          : currentPrice * (1 - takeProfitPercent / 100);
-
-      let stopLossPrice =
-        side === 'Buy'
-          ? currentPrice * (1 - stopLossPercent / 100)
-          : currentPrice * (1 + stopLossPercent / 100);
-
-      // Корректируем цены под tickSize
       const adjustPrice = (price: number) => {
         const tickSize = parseFloat(priceFilter.tickSize);
         return Math.round(price / tickSize) * tickSize;
       };
 
-      takeProfitPrice = adjustPrice(takeProfitPrice);
-      stopLossPrice = adjustPrice(stopLossPrice);
+      const takeProfitPrice = adjustPrice(
+        side === 'Buy'
+          ? currentPrice * (1 + takeProfitPercent / 100)
+          : currentPrice * (1 - takeProfitPercent / 100),
+      );
 
-      // Валидация TP/SL
-      if (side === 'Sell' && takeProfitPrice >= currentPrice) {
-        throw new Error(
-          `TP для шорта должен быть ниже цены входа (${takeProfitPrice} >= ${currentPrice})`,
-        );
-      }
-      if (side === 'Buy' && takeProfitPrice <= currentPrice) {
-        throw new Error(
-          `TP для лонга должен быть выше цены входа (${takeProfitPrice} <= ${currentPrice})`,
-        );
-      }
+      const stopLossPrice = adjustPrice(
+        side === 'Buy'
+          ? currentPrice * (1 - stopLossPercent / 100)
+          : currentPrice * (1 + stopLossPercent / 100),
+      );
 
-      // 6. Отправляем ордер
-      const response = await this.bybitClient.submitOrder({
+      // 6. Отправка ордера
+      const orderPayload: OrderParamsV5 = {
         category: 'linear',
         symbol,
         side,
@@ -129,22 +130,26 @@ export class BybitService {
         qty: roundedQty,
         timeInForce: 'GTC',
         isLeverage: 1,
-        takeProfit: takeProfitPrice.toFixed(2),
-        stopLoss: stopLossPrice.toFixed(2),
+        takeProfit: takeProfitPrice.toFixed(parseInt(instrument.priceScale)),
+        stopLoss: stopLossPrice.toFixed(parseInt(instrument.priceScale)),
         tpTriggerBy: 'MarkPrice',
         slTriggerBy: 'MarkPrice',
-        positionIdx: side === 'Buy' ? 1 : 2,
-      });
+        positionIdx: 0, // Исправлено: One-way mode
+      };
 
-      // 7. Отправка уведомления и обработка результата
+      console.log('Order payload:', orderPayload);
+
+      const response = await this.bybitClient.submitOrder(orderPayload);
+      console.log('Ответ Bybit:', JSON.stringify(response, null, 2));
+
+      // 7. Обработка ответа
       if (response.retCode === 0) {
         const message = `<b>⚡ Ордер исполнен</b>\n▸ Символ: <b>${symbol}</b>\n▸ Тип: <b>${side}</b>`;
         await this.telegramService.sendMessage(this.reciverTgId, message);
 
-        // Добавляем отслеживание позиции
         const trackedPosition: TrackedPosition = {
-          symbol: symbol,
-          side: side,
+          symbol,
+          side,
           entryPrice: currentPrice,
           takeProfit: takeProfitPrice,
           stopLoss: stopLossPrice,
@@ -153,11 +158,13 @@ export class BybitService {
         };
 
         this.tradeTracker.trackNewPosition(trackedPosition);
+        return response;
+      } else {
+        throw new Error(response.retMsg || 'Unknown error');
       }
-
-      return response;
     } catch (error) {
       const errorMsg = error.response?.data?.retMsg || error.message;
+      console.error('Ошибка размещения ордера:', errorMsg);
       await this.telegramService.sendMessage(
         this.reciverTgId,
         `<b>❌ Ошибка:</b> ${symbol} - ${errorMsg}`,
@@ -170,59 +177,21 @@ export class BybitService {
     symbol: string,
     price: number,
     qty: number,
+    lotSizeFilter: any,
   ): string {
-    // Определяем шаг округления в зависимости от цены
-    let precision: number;
+    const minQty = parseFloat(lotSizeFilter.minOrderQty);
+    const maxQty = parseFloat(lotSizeFilter.maxOrderQty);
+    const qtyStep = parseFloat(lotSizeFilter.qtyStep);
 
-    if (price >= 10000) {
-      precision = 3; // Для активов дороже $10,000 - 3 знака после запятой
-    } else if (price >= 1000) {
-      precision = 2; // Для активов дороже $1,000 - 2 знака
-    } else {
-      precision = 1; // Для остальных - 1 знак
-    }
+    let validQty = Math.max(minQty, qty);
+    validQty = Math.min(maxQty, validQty);
+    validQty = Math.round(validQty / qtyStep) * qtyStep;
 
-    // Получаем минимальный шаг для символа
-    const minStep = this.getMinStep(symbol);
-    const minQty = this.getMinQty(symbol);
-
-    // Округляем до нужного количества знаков
-    let rounded = parseFloat(qty.toFixed(precision));
-
-    // Проверяем, чтобы количество было кратно минимальному шагу
-    if (minStep > 0) {
-      rounded = Math.round(rounded / minStep) * minStep;
-    }
-
-    // Проверяем минимальное количество
-    rounded = Math.max(minQty, rounded);
-
-    // Форматируем без лишних нулей
-    return rounded.toFixed(precision).replace(/\.?0+$/, '');
+    return validQty.toFixed(this.getPrecision(qtyStep));
   }
 
-  private getMinStep(symbol: string): number {
-    // Минимальные шаги для разных пар (можно расширить)
-    const minSteps: Record<string, number> = {
-      BTCUSDT: 0.001,
-      ETHUSDT: 0.01,
-      SOLUSDT: 0.1,
-      BNBUSDT: 0.01,
-      '1000PEPEUSDT': 100,
-    };
-    return minSteps[symbol] || 0.001;
-  }
-
-  private getMinQty(symbol: string): number {
-    // Минимальные объемы для разных пар
-    const minQtys: Record<string, number> = {
-      BTCUSDT: 0.001,
-      ETHUSDT: 0.01,
-      SOLUSDT: 0.1,
-      BNBUSDT: 0.01,
-      '1000PEPEUSDT': 100,
-    };
-    return minQtys[symbol] || 0.001;
+  private getPrecision(step: number): number {
+    return step.toString().split('.')[1]?.length || 0;
   }
 
   private async handleLiquidation(event: LiquidationEvent) {
